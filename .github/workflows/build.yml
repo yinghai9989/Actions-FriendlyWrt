@@ -336,6 +336,26 @@ jobs:
         #     ../scripts/3rd/add_r8125.sh
         #     ;;
         # esac
+    - name: Compile uboot and kernel
+      run: |
+        cd project
+
+        # 安装生成 BTF 所需的工具
+        sudo apt-get update
+        sudo apt-get install -y dwarves
+        pahole --version
+
+        # 应用自定义内核配置
+        source ../scripts/custome_kernel_config.sh
+
+        ./build.sh uboot
+        ./build.sh kernel
+
+        # 验证最终内核配置已启用 BTF
+        if ! grep -q '^CONFIG_DEBUG_INFO_BTF=y$' kernel/.config; then
+          echo "::error::内核未启用 CONFIG_DEBUG_INFO_BTF，请检查配置和编译日志"
+          exit 1
+        fi        
 
     - name: Build sd image
       id: build_sd_image
