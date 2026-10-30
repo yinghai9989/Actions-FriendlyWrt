@@ -1,0 +1,125 @@
+        [ "${{ matrix.SET }}" == "docker" ] && SUFFIX="-docker"
+        IMG_FILE=${MODEL}-FriendlyWrt-${{ matrix.VERSION }}${SUFFIX}.img
+        TGZ_FILE=images-${MODEL}-FriendlyWrt-${{ matrix.VERSION }}${SUFFIX}.tgz
+        DIST_DIR=friendlywrt$(echo ${{ matrix.VERSION }}|awk -F . '{print $1}')${SUFFIX}
+
+        CONFIG=rockchip${SUFFIX}
+        cat > .current_config.mk <<EOL
+        . device/friendlyelec/${{ matrix.CPU }}/base.mk
+        TARGET_IMAGE_DIRNAME=${DIST_DIR}
+        TARGET_FRIENDLYWRT_CONFIG=${CONFIG}
+        TARGET_SD_RAW_FILENAME=${IMG_FILE}
+        EOL
+
+        echo "img_filename=$IMG_FILE" >> $GITHUB_OUTPUT
+        echo "archive_filename=$TGZ_FILE" >> $GITHUB_OUTPUT
+        echo "dist_dir=$DIST_DIR" >> $GITHUB_OUTPUT
+        echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
+
+    - name: Unpack friendlywrt rootfs
+      run: |
+        cd project
+        SUFFIX="${{ steps.config.outputs.suffix }}"
+        tar xzf "../rootfs-friendlywrt-${{ matrix.VERSION }}${SUFFIX}.tgz"
+
+    - name: Unpack host package-manager bundle
+      run: |
+        cd project
+        tar xzf "../host-pm-${{ matrix.VERSION }}.tgz"
+
+    - name: Compile uboot and kernel
+      run: |
+        cd project
+
+        # 安装生成 BTF 所需的工具
+        sudo apt-get update
+        sudo apt-get install -y dwarves
+        pahole --version
+
+        # 应用自定义内核配置
+        source ../scripts/custome_kernel_config.sh
+
+        set -o pipefail
+        ./build.sh uboot 2>&1 | tee uboot-build.log
+        ./build.sh kernel 2>&1 | tee kernel-build.log
+
+        # 验证最终内核配置已启用 BTF
+        if ! grep -q '^CONFIG_DEBUG_INFO_BTF=y$' kernel/.config; then
+          echo "::error::内核未启用 CONFIG_DEBUG_INFO_BTF，请检查配置和编译日志"
+          exit 1
+        fi        
+
+    - name: Upload kernel diagnostics
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-diagnostics-${{ matrix.VERSION }}-${{ matrix.CPU }}-${{ matrix.SET }}-${{ github.run_attempt }}
+        retention-days: 7
+        if-no-files-found: warn
+        include-hidden-files: true
+        path: |
+          project/uboot-build.log
+          project/kernel-build.log
+          project/kernel/.config
+
+    - name: Build sd image
+      id: build_sd_image
+      run: |
+        cd project
+        ./build.sh sd-img
+        mv out/${{ steps.config.outputs.img_filename }} ../artifact/
+
+        # package images-xyz.tgz
+        pushd scripts/sd-fuse/ > /dev/null
+        if [ ! -d "${{ steps.config.outputs.dist_dir }}" ]; then
+            echo "ERROR: image directory ${{ steps.config.outputs.dist_dir }} not found under scripts/sd-fuse/"
+            ls -la
+            exit 1
+        fi
+        archive_dir="${{ steps.config.outputs.dist_dir }}-${{ matrix.CPU }}"
+        mv "${{ steps.config.outputs.dist_dir }}" "${archive_dir}"
+        tar czf "${{ steps.config.outputs.archive_filename }}" "${archive_dir}"
+        mv ${{ steps.config.outputs.archive_filename }} ../../../artifact/
+        popd > /dev/null
+
+        cd ../artifact/
+        gzip *.img
+
+    - name: Upload images-XYZ.tgz to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ./artifact/${{ steps.config.outputs.archive_filename }}
+        asset_name: ${{ steps.config.outputs.archive_filename }}
+        tag: ${{ needs.prepare_release.outputs.release_tag }}
+        overwrite: true
+
+    - name: Upload XYZ.img.gz to release
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        file: ./artifact/${{ steps.config.outputs.img_filename }}.gz
+        asset_name: ${{ steps.config.outputs.img_filename }}.gz
+        tag: ${{ needs.prepare_release.outputs.release_tag }}
+        overwrite: true
+
+  cleanup_intermediate_assets:
+    needs: [prepare_release, build_img]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+    - name: Delete intermediate assets from release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_TAG: ${{ needs.prepare_release.outputs.release_tag }}
+      run: |
+        gh release view "$RELEASE_TAG" \
+          --repo "$GITHUB_REPOSITORY" \
+          --json assets \
+          --jq '.assets[] | select(.name | startswith("rootfs-friendlywrt-") or startswith("host-pm-")) | .name' \
+        | while read -r asset; do
+            [ -z "$asset" ] && continue
+            echo "Deleting asset: $asset"
+            gh release delete-asset "$RELEASE_TAG" "$asset" --yes --repo "$GITHUB_REPOSITORY"
+          done
