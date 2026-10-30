@@ -346,7 +346,42 @@ jobs:
       run: |
         cd project
         tar xzf "../host-pm-${{ matrix.VERSION }}.tgz"
+    - name: Fix rtw88 compatibility with kernel 6.1
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
 
+        p = Path("project/scripts/sd-fuse/build-kernel.sh")
+        if not p.is_file():
+            raise SystemExit(f"找不到构建脚本：{p}")
+
+        s = p.read_text()
+        marker = "(cd rtw88/ && {"
+
+        if s.count(marker) != 1:
+            raise SystemExit(
+                "rtw88 构建代码与预期不同，停止修补，请检查 build-kernel.sh"
+            )
+
+        patch = r"""
+            # 在驱动下载完成后、make 前修复当前函数中的宏调用
+            test -f rtw8723b.c || exit 1
+            sed -i '/rtw8723b_phy_set_param(/,/^}/s/FIELD_PREP_CONST(/FIELD_PREP(/g' rtw8723b.c
+
+            # 如果目标函数仍有不兼容调用，则停止构建
+            if sed -n '/rtw8723b_phy_set_param(/,/^}/p' rtw8723b.c \
+                | grep -q 'FIELD_PREP_CONST('; then
+                echo "ERROR: rtw88 compatibility patch failed"
+                exit 1
+            fi
+        """
+
+        s = s.replace(marker, marker + "\n" + patch, 1)
+        p.write_text(s)
+        print(f"已加入 rtw88 兼容修补：{p}")
+        PY
+        
     - name: Compile uboot and kernel
       run: |
         cd project
