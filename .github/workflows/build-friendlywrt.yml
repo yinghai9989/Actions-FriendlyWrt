@@ -381,7 +381,38 @@ jobs:
         p.write_text(s)
         print(f"已加入 rtw88 兼容修补：{p}")
         PY
-        
+    - name: Fix missing Realtek SDIO IDs
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+
+        p = Path("project/kernel/include/linux/mmc/sdio_ids.h")
+        if not p.is_file():
+            raise SystemExit(f"找不到内核头文件：{p}")
+
+        s = p.read_text()
+        marker = "/* FriendlyWrt Realtek SDIO compatibility */"
+        patch = """
+        /* FriendlyWrt Realtek SDIO compatibility */
+        #ifndef SDIO_VENDOR_ID_REALTEK
+        #define SDIO_VENDOR_ID_REALTEK 0x024c
+        #endif
+
+        #ifndef SDIO_DEVICE_ID_REALTEK_RTW8723BS
+        #define SDIO_DEVICE_ID_REALTEK_RTW8723BS 0xb723
+        #endif
+
+        """
+        if marker not in s:
+            pos = s.rfind("#endif")
+            if pos < 0:
+                raise SystemExit("找不到头文件末尾的 #endif")
+            p.write_text(s[:pos] + patch + s[pos:])
+            print(f"已补齐 Realtek SDIO 定义：{p}")
+        else:
+            print("补丁已存在，无须重复添加")
+        PY        
     - name: Compile uboot and kernel
       run: |
         cd project
