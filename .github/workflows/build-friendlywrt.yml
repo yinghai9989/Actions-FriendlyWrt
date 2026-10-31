@@ -381,10 +381,11 @@ jobs:
         p.write_text(s)
         print(f"已加入 rtw88 兼容修补：{p}")
         PY
+
     - name: Fix missing Realtek SDIO IDs
       shell: bash
       run: |
-        python3 - <<'PY'
+        python3 -c '
         from pathlib import Path
 
         p = Path("project/kernel/include/linux/mmc/sdio_ids.h")
@@ -412,7 +413,8 @@ jobs:
             print(f"已补齐 Realtek SDIO 定义：{p}")
         else:
             print("补丁已存在，无须重复添加")
-        PY        
+        '
+        
     - name: Compile uboot and kernel
       run: |
         cd project
